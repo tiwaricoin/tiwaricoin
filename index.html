@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tiwariicoin Farm</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for the tap zone */
+        #tap-zone {
+            transition: transform 0.05s ease-out;
+            box-shadow: 0 8px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+        }
+        #tap-zone:active {
+            transform: scale(0.96);
+            box-shadow: 0 4px 8px -2px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+        .token-icon {
+            font-size: 3rem;
+        }
+        .tab-button.active {
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.5); /* Ring effect */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 transition-colors duration-300 min-h-screen flex flex-col items-center p-4" style="font-family: 'Inter', sans-serif;">
+
+    <!-- The Telegram Web App SDK is crucial for integration -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <div id="app" class="w-full max-w-md mx-auto">
+        <h1 class="text-3xl font-extrabold mb-6 text-center text-gray-900 dark:text-white">💰 Tiwariicoin Miner</h1>
+
+        <!-- Navigation Tabs -->
+        <div class="flex justify-around bg-white dark:bg-gray-800 p-2 rounded-xl mb-6 shadow-lg">
+            <button onclick="switchTab('farm')" id="tab-farm" class="tab-button px-4 py-2 text-lg font-semibold rounded-lg transition-all duration-200 bg-blue-600 text-white active">
+                ⛏️ Mine
+            </button>
+            <button onclick="switchTab('upgrades')" id="tab-upgrades" class="tab-button px-4 py-2 text-lg font-semibold rounded-lg transition-all duration-200 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700">
+                🚀 Upgrades
+            </button>
+        </div>
+
+        <!-- System Message Box (for alerts/errors) -->
+        <div id="system-message" class="mt-2 p-3 text-sm rounded-xl text-center hidden"></div>
+
+
+        <!-- 1. FARM TAB CONTENT -->
+        <div id="farm-tab" class="tab-content">
+            <div class="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-3xl p-6 flex flex-col items-center justify-center text-white shadow-2xl">
+                <h2 class="text-xl font-medium opacity-90 mb-2">Your Tiwariicoin Balance</h2>
+                <div id="balance-output" class="text-6xl font-black mb-6 flex items-center">
+                    <span class="token-icon mr-3">💰</span>
+                    0
+                </div>
+
+                <!-- The Tap Zone -->
+                <button id="tap-zone" class="w-full py-6 px-6 bg-yellow-400 hover:bg-yellow-300 active:bg-yellow-500 text-blue-900 font-extrabold text-2xl rounded-3xl shadow-xl transition-all duration-150 transform">
+                    TAP TO MINE
+                </button>
+                <p id="farm-stats" class="mt-5 text-sm opacity-80">Rate: 1 T/Tap | Energy: 500/500</p>
+            </div>
+        </div>
+
+        <!-- 2. UPGRADES TAB CONTENT -->
+        <div id="upgrades-tab" class="tab-content hidden">
+            <div class="bg-white dark:bg-gray-800 rounded-3xl p-6 shadow-xl">
+                <h2 class="text-2xl font-extrabold mb-6 text-gray-900 dark:text-white text-center">Upgrade Your Operations</h2>
+
+                <div id="upgrades-list">
+                    <div class="p-4 text-center text-gray-500 dark:text-gray-400">Loading upgrades...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer Info -->
+        <div class="text-xs text-gray-400 dark:text-gray-600 mt-6 text-center">
+             <span id="auth-status-info">Loading authentication...</span>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Firebase/Auth Setup (Mandatory for persistence) ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set Firebase logging level (useful for debugging)
+        setLogLevel('debug');
+
+        // Global Firebase variables (provided by the environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'tiwariicoin-farm-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        
+        // Telegram Data will be stored here
+        let telegramInitData = null;
+
+        const balanceOutput = document.getElementById('balance-output');
+        const tapZone = document.getElementById('tap-zone');
+        const systemMessage = document.getElementById('system-message');
+        const farmStats = document.getElementById('farm-stats');
+        const upgradesList = document.getElementById('upgrades-list');
+        const authStatusInfo = document.getElementById('auth-status-info');
+        
+        // Game State (managed locally and synced with Firestore)
+        let gameData = {
+            balance: 0,
+            miningRate: 1, 
+            energyCurrent: 500, 
+            energyMax: 500, 
+            refillStartTime: Date.now(),
+            telegramId: null,
+            upgradeLevels: {
+                rate: 1,
+                energy: 1
+            }
+        };
+
+        // Upgrade Definitions
+        const UPGRADES_CONFIG = {
+            rate: {
+                name: "Mining Efficiency",
+                icon: "⚡️",
+                cost(level) { return 100 * level * level; }, // Cost increases exponentially
+                effect(level) { return 1 + (level * 2); } // Rate increases by 2 per level
+            },
+            energy: {
+                name: "Max Capacity",
+                icon: "🔋",
+                cost(level) { return 500 * level * level; },
+                effect(level) { return 500 + (level * 300); } // Max energy increases by 300 per level
+            }
+        };
+
+        // --- Tab Switching Logic ---
+        window.switchTab = function(tabName) {
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.add('hidden');
+            });
+            document.getElementById(`${tabName}-tab`).classList.remove('hidden');
+
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active', 'bg-blue-600', 'text-white');
+                btn.classList.add('text-gray-600', 'dark:text-gray-400', 'hover:bg-gray-200', 'dark:hover:bg-gray-700');
+            });
+
+            const selectedBtn = document.getElementById(`tab-${tabName}`);
+            selectedBtn.classList.add('active', 'bg-blue-600', 'text-white');
+            selectedBtn.classList.remove('text-gray-600', 'dark:text-gray-400', 'hover:bg-gray-200', 'dark:hover:bg-gray-700');
+        }
+
+        // --- Utility Functions ---
+
+        function showMessage(message, isError = false) {
+            systemMessage.textContent = message;
+            systemMessage.className = `mt-2 p-3 text-sm rounded-xl text-center ${isError ? 'bg-red-200 text-red-800' : 'bg-green-200 text-green-800'}`;
+            systemMessage.classList.remove('hidden');
+            setTimeout(() => {
+                 systemMessage.classList.add('hidden');
+            }, 3000);
+        }
+
+        // --- Core Authentication and Initialization ---
+
+        async function initFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                authStatusInfo.textContent = "Authenticating...";
+
+                // Authenticate using the provided token or anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        authStatusInfo.textContent = `User ID: ${userId.substring(0, 8)}... (Tiwariicoin Farmer)`;
+                        // Initialize Telegram WebApp SDK
+                        initTelegramWebApp();
+                    } else {
+                        console.error("Firebase Auth state is not ready or user signed out.");
+                        authStatusInfo.textContent = "Authentication Failed.";
+                        showMessage("Authentication Failed. Please restart the app.", true);
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase or signing in:", error);
+                authStatusInfo.textContent = "Fatal Error.";
+                showMessage(`Fatal Error: ${error.message}`, true);
+            }
+        }
+
+        function getProfileDocRef(uid) {
+            // Secure Firestore Path: /artifacts/{appId}/users/{userId}/{collectionName}/{documentId}
+            return doc(db, `artifacts/${appId}/users/${uid}/game_data`, 'profile');
+        }
+
+        function initTelegramWebApp() {
+            if (window.Telegram && window.Telegram.WebApp) {
+                const WebApp = window.Telegram.WebApp;
+                WebApp.ready();
+                WebApp.expand(); // Use full screen space
+                
+                // CRITICAL: Store the raw initData string for security validation (backend use)
+                telegramInitData = WebApp.initData;
+
+                if (WebApp.initDataUnsafe && WebApp.initDataUnsafe.user) {
+                    const user = WebApp.initDataUnsafe.user;
+                    gameData.telegramId = user.id;
+                    setupGameDataListener();
+
+                } else {
+                    console.warn("Telegram user data not available. Running in non-Mini App mode.");
+                    setupGameDataListener(); // Still try to load data for authenticated user
+                }
+            } else {
+                console.warn("Telegram WebApp SDK not found.");
+                setupGameDataListener();
+            }
+        }
+
+        // --- Firestore Game Data Management ---
+
+        function setupGameDataListener() {
+            if (!userId) return;
+
+            const profileRef = getProfileDocRef(userId);
+
+            onSnapshot(profileRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    // Update local game state from Firestore
+                    Object.assign(gameData, docSnap.data());
+                    updateUI();
+                } else {
+                    // Initialize document if it doesn't exist (First time user)
+                    initializeNewUser(profileRef);
+                }
+            }, (error) => {
+                console.error("Error listening to game data:", error);
+                showMessage("Could not sync Tiwariicoin data.", true);
+            });
+        }
+
+        async function initializeNewUser(profileRef) {
+             const initialData = {
+                balance: 0,
+                miningRate: UPGRADES_CONFIG.rate.effect(1),
+                energyCurrent: UPGRADES_CONFIG.energy.effect(1),
+                energyMax: UPGRADES_CONFIG.energy.effect(1),
+                refillStartTime: Date.now(),
+                telegramId: gameData.telegramId,
+                upgradeLevels: { rate: 1, energy: 1 },
+                createdAt: new Date().toISOString()
+            };
+            try {
+                await setDoc(profileRef, initialData);
+                Object.assign(gameData, initialData);
+                updateUI();
+                showMessage("Welcome, new Tiwariicoin Miner! Tap to begin.", false);
+            } catch (e) {
+                console.error("Error initializing user data:", e);
+                showMessage("Failed to set up your Tiwariicoin data.", true);
+            }
+        }
+
+        // --- Game Logic ---
+        
+        const REFILL_RATE_MS = 10000; // 1 energy point refills every 10 seconds
+
+        function calculateCurrentEnergy(data) {
+            const now = Date.now();
+            const timeElapsed = now - data.refillStartTime;
+            
+            // Check if refill is needed
+            if (data.energyCurrent < data.energyMax) {
+                const pointsRefilled = Math.floor(timeElapsed / REFILL_RATE_MS);
+                let newEnergy = data.energyCurrent + pointsRefilled;
+
+                if (newEnergy >= data.energyMax) {
+                    // If maxed out, reset timer to 'now'
+                    data.refillStartTime = now; 
+                    return data.energyMax;
+                } else if (pointsRefilled > 0) {
+                    // Advance refill start time by the amount refilled
+                    data.refillStartTime += pointsRefilled * REFILL_RATE_MS;
+                    return newEnergy;
+                }
+            }
+            return data.energyCurrent;
+        }
+
+        async function handleTap() {
+            if (!isAuthReady || !userId) {
+                showMessage("App is loading or authorization failed.", true);
+                return;
+            }
+
+            // Client-side quick check
+            if (gameData.energyCurrent < 1) {
+                showMessage("Energy depleted! Cannot mine Tiwariicoin.", true);
+                return;
+            }
+            
+            tapZone.disabled = true;
+            tapZone.textContent = 'MINING...';
+            
+            const profileRef = getProfileDocRef(userId);
+            
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const docSnap = await transaction.get(profileRef);
+                    if (!docSnap.exists()) {
+                        throw "Document does not exist!";
+                    }
+                    
+                    const latestData = docSnap.data();
+                    
+                    // 1. Calculate energy refill and update energyCurrent and refillStartTime
+                    latestData.energyCurrent = calculateCurrentEnergy(latestData);
+
+                    // 2. Perform tap action if energy is sufficient
+                    if (latestData.energyCurrent >= 1) {
+                        latestData.balance += latestData.miningRate;
+                        latestData.energyCurrent -= 1;
+                        // Important: Update refillStartTime immediately after spending energy
+                        latestData.refillStartTime = Date.now(); 
+                    } else {
+                        throw new Error("Energy depleted on server side.");
+                    }
+                    
+                    // 3. Update the document
+                    transaction.update(profileRef, latestData);
+                });
+                showMessage(`+${gameData.miningRate.toLocaleString()} Tiwariicoin!`, false);
+            } catch (e) {
+                if (e.message && e.message.includes("Energy depleted")) {
+                     showMessage("Energy depleted! Cannot mine.", true);
+                } else {
+                    console.error("Mining Transaction failed:", e);
+                    showMessage("Mining failed. Try again.", true);
+                }
+            } finally {
+                tapZone.disabled = false;
+                tapZone.innerHTML = `TAP TO MINE <span class="font-normal text-xl ml-2">(${Math.floor(gameData.energyCurrent)}/${gameData.energyMax.toLocaleString()})</span>`;
+                updateUI(); 
+            }
+        }
+
+        async function handleUpgrade(type) {
+            if (!isAuthReady || !userId) {
+                showMessage("Authentication not ready.", true);
+                return;
+            }
+
+            const currentLevel = gameData.upgradeLevels[type];
+            const nextLevel = currentLevel + 1;
+            const cost = UPGRADES_CONFIG[type].cost(currentLevel);
+
+            if (gameData.balance < cost) {
+                showMessage(`Not enough Tiwariicoin! You need ${cost.toLocaleString()} 💰.`, true);
+                return;
+            }
+
+            const profileRef = getProfileDocRef(userId);
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const docSnap = await transaction.get(profileRef);
+                    if (!docSnap.exists()) {
+                        throw "Document does not exist!";
+                    }
+                    
+                    const latestData = docSnap.data();
+
+                    if (latestData.balance < cost) {
+                        throw new Error("Insufficient funds to purchase upgrade.");
+                    }
+
+                    // 1. Deduct cost
+                    latestData.balance -= cost;
+
+                    // 2. Increase level
+                    latestData.upgradeLevels[type] = nextLevel;
+
+                    // 3. Apply new effect and refill energy if max capacity upgraded
+                    if (type === 'rate') {
+                        latestData.miningRate = UPGRADES_CONFIG.rate.effect(nextLevel);
+                    } else if (type === 'energy') {
+                        const newMaxEnergy = UPGRADES_CONFIG.energy.effect(nextLevel);
+                        const oldMaxEnergy = latestData.energyMax;
+                        
+                        latestData.energyMax = newMaxEnergy;
+                        // Refill any newly added capacity
+                        latestData.energyCurrent = Math.min(latestData.energyCurrent + (newMaxEnergy - oldMaxEnergy), newMaxEnergy); 
+                    }
+                    
+                    // 4. Update the document
+                    transaction.update(profileRef, latestData);
+                });
+
+                showMessage(`✅ ${UPGRADES_CONFIG[type].name} upgraded to Level ${nextLevel}!`, false);
+            } catch (e) {
+                console.error("Upgrade transaction failed:", e);
+                showMessage("Upgrade failed: " + (e.message || "Transaction error."), true);
+            } finally {
+                 updateUI();
+            }
+        }
+
+        // --- UI Update ---
+
+        function updateUI() {
+            // Update Farm Tab
+            const currentEnergy = calculateCurrentEnergy(gameData);
+            gameData.energyCurrent = currentEnergy; // Update the local gameData with refilled energy
+            
+            balanceOutput.innerHTML = `<span class="token-icon mr-3">💰</span> ${Math.floor(gameData.balance).toLocaleString()}`;
+            
+            const energyDisplay = `<span class="font-normal text-xl ml-2">(${Math.floor(gameData.energyCurrent)}/${gameData.energyMax.toLocaleString()})</span>`;
+            
+            farmStats.innerHTML = `Rate: ${gameData.miningRate.toLocaleString()} T/Tap | Energy: ${Math.floor(gameData.energyCurrent)}/${gameData.energyMax.toLocaleString()}`;
+
+            tapZone.innerHTML = `TAP TO MINE ${energyDisplay}`;
+
+            // Check if energy is available and disable button if not
+            if (gameData.energyCurrent < 1) {
+                 tapZone.disabled = true;
+                 tapZone.classList.remove('bg-yellow-400', 'hover:bg-yellow-300', 'active:bg-yellow-500');
+                 tapZone.classList.add('bg-gray-400', 'cursor-not-allowed');
+            } else {
+                 tapZone.disabled = false;
+                 tapZone.classList.add('bg-yellow-400', 'hover:bg-yellow-300', 'active:bg-yellow-500');
+                 tapZone.classList.remove('bg-gray-400', 'cursor-not-allowed');
+            }
+
+            // Update Upgrades Tab
+            renderUpgrades();
+        }
+
+        function renderUpgrades() {
+            upgradesList.innerHTML = '';
+            
+            Object.keys(UPGRADES_CONFIG).forEach(key => {
+                const config = UPGRADES_CONFIG[key];
+                const currentLevel = gameData.upgradeLevels[key] || 1;
+                const nextLevel = currentLevel + 1;
+                const cost = config.cost(currentLevel);
+                const currentEffect = config.effect(currentLevel);
+                const nextEffect = config.effect(nextLevel);
+                const canAfford = gameData.balance >= cost;
+                
+                // Determine button state and class
+                let buttonClass = 'bg-blue-600 hover:bg-blue-500';
+                let buttonText = `Buy (${cost.toLocaleString()} 💰)`;
+                if (!canAfford) {
+                    buttonClass = 'bg-gray-400 cursor-not-allowed';
+                    buttonText = `Need ${cost.toLocaleString()} 💰`;
+                }
+
+                const upgradeItem = document.createElement('div');
+                upgradeItem.className = 'flex justify-between items-center p-4 mb-4 bg-gray-100 dark:bg-gray-700 rounded-xl shadow-md border border-gray-200 dark:border-gray-600';
+                upgradeItem.innerHTML = `
+                    <div class="flex items-center">
+                        <span class="text-3xl mr-4">${config.icon}</span>
+                        <div>
+                            <p class="font-semibold text-gray-900 dark:text-white">${config.name} (Lvl ${currentLevel})</p>
+                            <p class="text-sm text-gray-500 dark:text-gray-400">Effect: ${currentEffect.toLocaleString()} → ${nextEffect.toLocaleString()}</p>
+                        </div>
+                    </div>
+                    <button id="buy-${key}" class="px-4 py-2 text-sm font-bold text-white rounded-lg transition-colors ${buttonClass}" ${canAfford ? '' : 'disabled'}>
+                        ${buttonText}
+                    </button>
+                `;
+                
+                upgradesList.appendChild(upgradeItem);
+
+                // Attach event listener to the dynamically created button
+                if (canAfford) {
+                    document.getElementById(`buy-${key}`).addEventListener('click', () => handleUpgrade(key));
+                }
+            });
+        }
+
+
+        // --- Event Listeners ---
+        
+        tapZone.addEventListener('click', handleTap);
+
+        // Start the application lifecycle
+        window.onload = initFirebase;
+        
+    </script>
+</body>
+</html>
